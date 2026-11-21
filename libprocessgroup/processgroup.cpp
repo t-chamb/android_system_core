@@ -128,6 +128,21 @@ bool SetTaskProfiles(int tid, const std::vector<std::string>& profiles, bool use
     return TaskProfiles::GetInstance().SetTaskProfiles(tid, profiles, use_fd_cache);
 }
 
+// Root of the per-app process groups (uid_<uid>/pid_<pid>). Kernels without cgroup v2 (before
+// 4.5) cannot mount it on /sys/fs/cgroup; use the cgroup v1 cpuacct hierarchy there, as Android
+// 10 and 11 did. Without either, apps get no process group and outlive a system_server restart.
+static bool GetProcessGroupRoot(std::string* path) {
+    auto& map = CgroupMap::GetInstance();
+    for (const char* name : {CGROUPV2_CONTROLLER_NAME, "cpuacct"}) {
+        auto controller = map.FindController(name);
+        if (controller.IsUsable()) {
+            *path = controller.path();
+            return true;
+        }
+    }
+    return CgroupGetControllerPath(CGROUPV2_CONTROLLER_NAME, path);
+}
+
 static std::string ConvertUidToPath(const char* cgroup, uid_t uid) {
     return StringPrintf("%s/uid_%d", cgroup, uid);
 }
@@ -187,7 +202,7 @@ void removeAllProcessGroups() {
     std::vector<std::string> cgroups;
     std::string path;
 
-    if (CgroupGetControllerPath(CGROUPV2_CONTROLLER_NAME, &path)) {
+    if (GetProcessGroupRoot(&path)) {
         cgroups.push_back(path);
     }
     if (CgroupGetControllerPath("memory", &path)) {
@@ -348,7 +363,7 @@ static int DoKillProcessGroupOnce(const char* cgroup, uid_t uid, int initialPid,
 static int KillProcessGroup(uid_t uid, int initialPid, int signal, int retries,
                             int* max_processes) {
     std::string hierarchy_root_path;
-    CgroupGetControllerPath(CGROUPV2_CONTROLLER_NAME, &hierarchy_root_path);
+    GetProcessGroupRoot(&hierarchy_root_path);
     const char* cgroup = hierarchy_root_path.c_str();
 
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
@@ -477,7 +492,7 @@ int createProcessGroup(uid_t uid, int initialPid, bool memControl) {
         }
     }
 
-    CgroupGetControllerPath(CGROUPV2_CONTROLLER_NAME, &cgroup);
+    GetProcessGroupRoot(&cgroup);
     return createProcessGroupInternal(uid, initialPid, cgroup);
 }
 
